@@ -6,7 +6,7 @@
 
 opencode.el is an Emacs package that interacts with the [OpenCode](https://opencode.ai) AI coding agent via the **ACP (Agent Client Protocol)**. **Zero external dependencies — built entirely with Emacs built-in libraries.**
 
-![Screenshot](screnshot.png)
+![Screenshot](screenshot.png)
 
 ## Installation
 
