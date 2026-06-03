@@ -4,7 +4,9 @@
 
 🔤[English Version](README.md)
 
-opencode.el 是一个 Emacs 包，通过 **ACP（Agent Client Protocol）** 与 [OpenCode](https://opencode.ai) AI 编程代理交互。零外部依赖，仅使用 Emacs 内置库。
+opencode.el 是一个 Emacs 包，通过 **ACP（Agent Client Protocol）** 与 [OpenCode](https://opencode.ai) AI 编程代理交互。**没有外部依赖，仅使用 Emacs 内置库。**
+
+![Screenshot](screnshot.png)
 
 ## 安装
 
