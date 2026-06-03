@@ -2,6 +2,8 @@
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
+🔤[English Version](README.md)
+
 opencode.el 是一个 Emacs 包，通过 **ACP（Agent Client Protocol）** 与 [OpenCode](https://opencode.ai) AI 编程代理交互。零外部依赖，仅使用 Emacs 内置库。
 
 ## 安装
@@ -18,6 +20,18 @@ opencode.el 是一个 Emacs 包，通过 **ACP（Agent Client Protocol）** 与 
 (use-package opencode
   :load-path "/path/to/opencode.el"
   :bind (("C-c o" . opencode)))
+```
+
+## 项目结构
+
+```
+opencode.el/
+├── opencode.el        # Emacs Lisp 客户端实现（ACP 协议）
+├── opencode.el.org    # 文字编程文档（Org Mode，可 tangle 提取代码）
+├── ACP.md             # ACP 协议原理讲解
+├── PRD.md             # 产品需求文档
+├── README.md          # 英文 README
+└── README-zh.md       # 本文件
 ```
 
 ## 使用

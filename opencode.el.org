@@ -1,0 +1,2081 @@
+#+TITLE: opencode.el --- Emacs Integration for OpenCode via ACP
+#+AUTHOR: opencode.el contributors
+#+DATE: 2026
+#+PROPERTY: header-args:emacs-lisp :tangle "opencode.el"
+#+OPTIONS: toc:2 num:4
+#+STARTUP: overview
+
+#+BEGIN_COMMENT
+Table of Contents:
+
+1. Introduction
+2. Part I: Understanding the Agent Collaboration Protocol (ACP)
+   - 2.1. The Problem ACP Solves
+   - 2.2. What is ACP?
+   - 2.3. The Three-Step Handshake
+   - 2.4. Streaming Updates
+   - 2.5. The Full Visual Flow
+   - 2.6. How opencode.el Maps to ACP
+3. Part II: Code Walkthrough
+   - 3.1. Module Overview
+   - 3.2. File Header & Metadata
+   - 3.3. Dependencies
+   - 3.4. Customization Group & User Options
+   - 3.5. Internal State Variables
+   - 3.6. JSON Helper Functions
+   - 3.7. Process Management
+   - 3.8. JSON-RPC Layer
+   - 3.9. ACP Session Management
+   - 3.10. Prompt Handling
+   - 3.11. Streaming Update Handling
+   - 3.12. Buffer Display Functions
+   - 3.13. Major Mode
+   - 3.14. Interactive Commands
+   - 3.15. Package Footer
+4. Part III: Quick Usage Guide
+#+END_COMMENT
+
+* Introduction
+
+** What is this document?
+
+This is a **literate programming** document. It serves two purposes at once:
+
+1. It teaches you how the Agent Collaboration Protocol (ACP) works -- the
+   "conversation protocol" between your editor and an AI coding agent.
+2. It walks through every line of ~opencode.el~, the Emacs Lisp file that
+   implements the ACP client side, explaining why each piece exists.
+
+The document is written as an Org Mode file ([[https://orgmode.org][Org Mode]]). You can read it
+in Emacs with ~M-x org-mode~, or export it to HTML/PDF. You can also
+**tangle** it -- that is, extract the source code blocks into a working
+~opencode.el~ file. See [[*Tangling the Code][Tangling the Code]].
+
+** Who is this for?
+
+You are a developer who:
+
+- Has basic programming experience (you know what a variable, a function,
+  and a conditional are).
+- Uses or wants to use Emacs.
+- Is curious about how editor-AI integration actually works under the hood.
+- Wants to understand ~opencode.el~ well enough to modify or contribute to it.
+
+You do NOT need:
+
+- Prior Emacs Lisp experience (we explain each Emacs-ism as we go).
+- Prior knowledge of ACP or JSON-RPC (we start from zero).
+
+** How to read this document
+
+The document has three parts:
+
+- [[*Part I: Understanding the Agent Collaboration Protocol (ACP)]][Part I]] explains the ACP
+  protocol conceptually. Read this first if you want to understand /what/
+  the code is trying to do.
+- [[*Part II: Code Walkthrough][Part II]] is the code itself, presented in small, explained
+  blocks. Read this to understand /how/ the protocol is implemented.
+- [[*Part III: Quick Usage Guide][Part III]] is a quick reference for actually using ~opencode.el~.
+
+You can read front-to-back, or jump between sections.
+
+** Tangling the Code
+
+"Tangling" means extracting the source code blocks from this Org file into
+a regular ~.el~ file that Emacs can load. To tangle:
+
+#+BEGIN_SRC sh :tangle no
+emacs -Q --batch --eval "(org-babel-tangle-file \"opencode.el.org\")"
+#+END_SRC
+
+Or, inside Emacs:
+
+1. Open ~opencode.el.org~.
+2. Press ~C-c C-v C-t~ (~org-babel-tangle~).
+3. A file named ~opencode.el~ will be created (or overwritten) in the same
+   directory, containing only the code from the ~SRC~ blocks tagged with
+   ~:tangle "opencode.el"~.
+
+The tangled code is functionally identical to the original ~opencode.el~.
+Comments inside the code blocks may differ from the original -- they have
+been updated to match the explanations in this document.
+
+** Conventions
+
+- ~M-x command~ means "press ~M-x~, type ~command~, press ~RET~".
+- ~C-c C-c~ means "hold Ctrl, press c twice".
+- Code blocks with ~:tangle "opencode.el"~ are the ones that get extracted
+  when you tangle. Blocks with ~:tangle no~ are examples or illustrations
+  that stay in the document only.
+
+* Part I: Understanding the Agent Collaboration Protocol (ACP)
+
+** 2.1 The Problem ACP Solves
+
+Imagine you are working on a bug fix in Emacs. You select a function, press
+a key, and ask an AI: "Why is this returning nil?" The AI thinks for a
+moment, then writes back a fix, creates a new file, and shows you what it
+changed.
+
+Now ask: **what just happened behind the scenes?**
+
+Your message travelled from Emacs into the AI's "brain". The AI didn't
+just send back a final answer -- it sent back /intermediate thoughts/,
+/tool calls/ (like "I will now create a file"), and /status updates/. Your
+editor displayed all of this in /real time/, as it happened.
+
+This is not magic. It is a protocol.
+
+Before ACP existed, editor-AI integration was clunky:
+
+| Problem | Old approach | ACP approach |
+|---------|--------------|--------------|
+| AI takes time to respond | You stare at a spinner, waiting | Streaming: AI sends results as it generates them |
+| AI needs your code as context | You copy-paste manually | Structured protocol: send files, selections, errors as typed content blocks |
+| You want to interrupt the AI | Not possible mid-generation | Cancel notification: tell the AI to stop immediately |
+| Multiple editors want to talk to the same AI | Each writes its own ad-hoc protocol | ACP is an open standard everyone follows |
+
+ACP solves all of these. It is the "conversation etiquette" between your
+editor and an AI coding agent.
+
+** 2.2 What is ACP?
+
+ACP stands for **Agent Collaboration Protocol**. It is:
+
+- An open standard (co-developed by JetBrains and Zed).
+- Built on top of [[https://www.jsonrpc.org/specification][JSON-RPC 2.0]], a simple remote-procedure-call
+  protocol that uses JSON for data exchange.
+- A specification for how an editor (the "client") and an AI coding agent
+  (the "server") communicate over stdin/stdout.
+
+Think of it as a **phone call** between your editor and the AI:
+
+1. *Dial* -- the editor starts the ~opencode acp~ subprocess.
+2. *Handshake* -- "Hello, I am Emacs, protocol v1, nice to meet you."
+3. *Create a session* -- "I want to talk about project X."
+4. *Speak* -- "Can you refactor this function?"
+5. *Listen* -- The AI streams back thoughts, tool calls, and answers.
+6. *Hang up* -- "Goodbye."
+
+ACP does not care what programming language your editor is written in. It
+is just JSON over pipes. This means any editor -- Emacs, Vim, VS Code --
+can talk to any ACP-compatible AI agent.
+
+** 2.3 The Three-Step Handshake
+
+Before any real work happens, the editor and the agent perform a
+three-step initialization handshake. Every step is a JSON-RPC request
+followed by a response.
+
+*** Step 1: Initialize
+
+The editor sends:
+
+#+BEGIN_SRC json :tangle no
+{
+  "jsonrpc": "2.0",
+  "id": 1,
+  "method": "initialize",
+  "params": {
+    "protocolVersion": 1,
+    "clientCapabilities": {},
+    "clientInfo": {
+      "name": "emacs-opencode",
+      "version": "0.1.0"
+    }
+  }
+}
+#+END_SRC
+
+The agent responds with its own capabilities:
+
+#+BEGIN_SRC json :tangle no
+{
+  "jsonrpc": "2.0",
+  "id": 1,
+  "result": {
+    "agentInfo": {
+      "name": "opencode",
+      "version": "0.1.0"
+    },
+    "agentCapabilities": {...}
+  }
+}
+#+END_SRC
+
+This is like saying: "Hi, I'm Emacs, I speak ACP v1. Who are you?"
+
+*** Step 2: Create a Session
+
+Once initialized, the editor creates a "session" -- a conversation context
+bound to a specific working directory:
+
+#+BEGIN_SRC json :tangle no
+{
+  "jsonrpc": "2.0",
+  "id": 2,
+  "method": "session/new",
+  "params": {
+    "cwd": "/home/user/project",
+    "mcpServers": []
+  }
+}
+#+END_SRC
+
+The agent replies with a session ID:
+
+#+BEGIN_SRC json :tangle no
+{
+  "jsonrpc": "2.0",
+  "id": 2,
+  "result": {
+    "sessionId": "abc-123"
+  }
+}
+#+END_SRC
+
+From now on, every prompt includes this ~sessionId~ so the agent knows
+which conversation the message belongs to.
+
+*** Step 3: Send Prompts
+
+Now we can talk. A prompt is a JSON-RPC request:
+
+#+BEGIN_SRC json :tangle no
+{
+  "jsonrpc": "2.0",
+  "id": 3,
+  "method": "session/prompt",
+  "params": {
+    "sessionId": "abc-123",
+    "prompt": [
+      {"type": "text", "text": "Write a binary search function"}
+    ]
+  }
+}
+#+END_SRC
+
+The prompt can contain multiple "content blocks". For example, you can
+send a code file as a "resource" block and your question as a "text"
+block:
+
+#+BEGIN_SRC json :tangle no
+{
+  "prompt": [
+    {
+      "type": "resource",
+      "resource": {
+        "uri": "file:///home/user/project/src/main.go",
+        "mimeType": "text/plain",
+        "text": "package main\nfunc main() { ... }"
+      }
+    },
+    {"type": "text", "text": "Add error handling to this"}
+  ]
+}
+#+END_SRC
+
+This is how ~opencode-ask~ (bound to ~C-c C-r~) works: it packages the
+selected region as a resource block and your question as a text block.
+
+** 2.4 Streaming Updates
+
+The really clever part starts after a ~session/prompt~ is sent. The agent
+does not wait until it has finished thinking to reply. Instead, it sends a
+stream of **notifications** (JSON-RPC messages without an ~id~ field):
+
+#+BEGIN_SRC text :tangle no
+[notification] session/update → type: agent_thought_chunk  → "Let me think about this..."
+[notification] session/update → type: agent_thought_chunk  → "Binary search needs sorted array..."
+[notification] session/update → type: tool_call             → "I will create a file"
+[notification] session/update → type: agent_message_chunk  → "Here is the implementation..."
+[notification] session/update → type: tool_call_update     → "File created (success)"
+[response]                    → {stopReason: "finished"}
+#+END_SRC
+
+Each notification has a ~type~ field (inside ~sessionUpdate~) that tells
+the editor how to display it:
+
+| Type | Meaning | How the editor shows it |
+|------|---------|------------------------|
+| ~agent_message_chunk~ | Part of the agent's final answer | Bold blue text |
+| ~agent_thought_chunk~ | The model's internal reasoning | Italic dimmed text (toggleable) |
+| ~tool_call~ | The agent started a tool | A status line like ~[running] grep ...~ |
+| ~tool_call_update~ | A tool's status changed | Updates the existing line in-place |
+| ~user_message_chunk~ | Your own message echoed back (replay) | Ignored (we already showed it) |
+
+This design is what makes the editor feel "alive". You see the AI
+thinking, acting, and refining in real time.
+
+** 2.5 The Full Visual Flow
+
+Putting it all together:
+
+#+BEGIN_SRC artist :tangle no
+Emacs (opencode.el)                  opencode acp (AI agent)
+      │                                      │
+      │  ─── initialize ──────────────────►  │  (Step 1: Handshake)
+      │  ◄── {agentInfo, version} ────────── │
+      │                                      │
+      │  ─── session/new ─────────────────►  │  (Step 2: Create session)
+      │  ◄── {sessionId: "abc-123"} ──────── │
+      │                                      │
+      │  ─── session/prompt ──────────────►  │  (Step 3: Send prompt)
+      │  ◄── notify: agent_thought_chunk ─── │  (Streaming begins)
+      │  ◄── notify: agent_thought_chunk ─── │
+      │  ◄── notify: tool_call ───────────── │
+      │  ◄── notify: agent_message_chunk ─── │
+      │  ◄── notify: tool_call_update ────── │
+      │  ◄── {stopReason: "finished"} ────── │  (Response completes)
+      │                                      │
+      │  ─── session/cancel ──────────────►  │  (Optional: interrupt)
+#+END_SRC
+
+** 2.6 How opencode.el Maps to ACP
+
+The ~opencode.el~ file (about 1238 lines) implements the left column of
+that diagram. Here is the mapping:
+
+| ACP concept | opencode.el module | Lines |
+|-------------|-------------------|-------|
+| JSON encoding/decoding | JSON helpers | ~opencode--json-encode~, ~opencode--json-decode~ |
+| Sending a request | ~opencode--send-request~ | Sends JSON-RPC request, stores callback |
+| Sending a notification | ~opencode--send-notification~ | Sends JSON-RPC no-reply message |
+| Receiving messages | ~opencode--process-filter~ | Accumulates stdout, splits on newlines |
+| Dispatching messages | ~opencode--dispatch-message~ | Routes to callback or notification handler |
+| Initialize | ~opencode--acp-initialize~ | Sends "initialize" request |
+| Create session | ~opencode--acp-create-session~ | Sends "session/new" request |
+| Send prompt | ~opencode--send-prompt-internal~ | Sends "session/prompt" request |
+| Cancel prompt | ~opencode-cancel~ | Sends "session/cancel" notification |
+| Streaming updates | ~opencode--handle-update~ | Dispatches by type (thought, message, tool) |
+
+Now that you understand /what/ the protocol does, let us look at /how/
+opencode.el implements it.
+
+* Part II: Code Walkthrough
+
+** 3.1 Module Overview
+
+~opencode.el~ is structured as a series of layered modules:
+
+1. *File header & metadata* -- standard Emacs Lisp file header.
+2. *Dependencies* -- requires ~json.el~ from Emacs core.
+3. *Customization options* -- ~defcustom~, ~defface~ for user-facing settings.
+4. *Internal state* -- ~defvar~ variables that track connection, session, and
+   request state.
+5. *JSON helpers* -- thin wrappers around ~json.el~.
+6. *Process management* -- start, stop, filter, and sentinel for the
+   ~opencode acp~ subprocess.
+7. *JSON-RPC layer* -- send requests/notifications, dispatch incoming messages.
+8. *ACP session management* -- initialize handshake, create session.
+9. *Prompt handling* -- send prompts, queue them if not ready, handle response.
+10. *Streaming update handling* -- render thoughts, messages, tool calls.
+11. *Buffer display functions* -- insert text, scroll, manage the buffer.
+12. *Major mode* -- ~opencode-mode~ keymap and header line.
+13. *Interactive commands* -- the commands users actually call.
+14. *Package footer* -- ~provide~ and file end marker.
+
+Each module is explained in its own section below, with the corresponding
+source code ready to tangle.
+
+** 3.2 File Header & Metadata
+
+Every Emacs Lisp file starts with a standard header. This is not just a
+comment -- Emacs uses these lines to identify the file, its version, its
+dependencies, and its keywords.
+
+The header follows the convention:
+
+#+BEGIN_SRC emacs-lisp :tangle no
+;;; opencode.el --- Emacs integration for OpenCode via ACP  -*- lexical-binding: t; -*-
+#+END_SRC
+
+Let us break this down:
+
+- ~;;;~ -- three semicolons means this is a "top-level" comment (Emacs
+  uses the number of semicolons to determine section nesting).
+- ~opencode.el~ -- the filename.
+- ~--- ... ---~ -- the description, displayed in the mode line and package list.
+- ~-*- lexical-binding: t; -*-~ -- a "file-local variable" setting. It
+  tells Emacs to use /lexical scoping/ (like most modern languages) instead
+  of the older /dynamic scoping/. With lexical scoping, a function captures
+  the variables that were in scope when it was /defined/, not when it is
+  /called/. This is the recommended practice for all new Emacs Lisp code.
+
+After the one-liner comes copyright, authorship, and metadata:
+
+#+BEGIN_SRC emacs-lisp :tangle no
+;; Copyright (C) 2026
+
+;; Author: opencode.el contributors
+;; Version: 0.1.0
+;; Package-Requires: ((emacs "27.1"))
+;; Keywords: ai, tools, convenience
+;; URL: https://github.com/shuiruge/opencode.el
+#+END_SRC
+
+- ~Package-Requires:~ -- this file needs Emacs 27.1 or newer. It uses no
+  external packages -- everything comes from Emacs's built-in libraries.
+- ~Keywords:~ -- used by the Emacs package system for categorization.
+
+Next comes the commentary section:
+
+#+BEGIN_SRC emacs-lisp :tangle no
+;; This file is NOT part of GNU Emacs.
+
+;; Provides Emacs integration with OpenCode (https://opencode.ai) using
+;; the Agent Client Protocol (ACP).  No external dependencies beyond
+;; built-in Emacs libraries.
+;;
+;; Quick start:
+;;   M-x opencode                Start or switch to the *opencode* buffer
+;;   M-x opencode-send-prompt    Send a prompt (reads from minibuffer)
+;;   M-x opencode-ask            With region active, ask about selected code
+;;   M-x opencode-cancel         Cancel the current operation
+;;
+;; With a region selected in any buffer, M-x opencode-ask sends the
+;; selected text as context to OpenCode along with your question.
+#+END_SRC
+
+The ~;;; Code:~ marker signals the end of the commentary and the start of
+actual code.
+
+#+BEGIN_SRC emacs-lisp :tangle no
+;;; Code:
+#+END_SRC
+
+Now let us put it all together in a single tangle block:
+
+#+BEGIN_SRC emacs-lisp
+;;; opencode.el --- Emacs integration for OpenCode via ACP  -*- lexical-binding: t; -*-
+
+;; Copyright (C) 2026
+
+;; Author: opencode.el contributors
+;; Version: 0.1.0
+;; Package-Requires: ((emacs "27.1"))
+;; Keywords: ai, tools, convenience
+;; URL: https://github.com/shuiruge/opencode.el
+
+;; This file is NOT part of GNU Emacs.
+
+;; Provides Emacs integration with OpenCode (https://opencode.ai) using
+;; the Agent Client Protocol (ACP).  No external dependencies beyond
+;; built-in Emacs libraries.
+;;
+;; Quick start:
+;;   M-x opencode                Start or switch to the *opencode* buffer
+;;   M-x opencode-send-prompt    Send a prompt (reads from minibuffer)
+;;   M-x opencode-ask            With region active, ask about selected code
+;;   M-x opencode-cancel         Cancel the current operation
+;;
+;; With a region selected in any buffer, M-x opencode-ask sends the
+;; selected text as context to OpenCode along with your question.
+
+;;; Code:
+#+END_SRC
+
+** 3.3 Dependencies
+
+The only external module needed is ~json~, which is part of Emacs's core
+(since Emacs 22). It provides JSON encoding (~json-encode~) and decoding
+(~json-read-from-string~).
+
+Why JSON? ACP is built on JSON-RPC, which means every message between
+Emacs and the AI agent is a JSON string. We need to convert Emacs Lisp
+data structures (like alists, vectors, strings) to JSON when /sending/,
+and convert JSON back to Emacs structures when /receiving/.
+
+#+BEGIN_SRC emacs-lisp
+(require 'json)
+#+END_SRC
+
+** 3.4 Customization Group & User Options
+
+*** Customization group
+
+Emacs provides a built-in customization system accessible via ~M-x
+customize-group~. To use it, we first define a "group" that collects all
+OpenCode-related settings:
+
+#+BEGIN_SRC emacs-lisp
+(defgroup opencode nil
+  "Integration with the OpenCode AI coding agent."
+  :group 'external
+  :prefix "opencode-")
+#+END_SRC
+
+- ~nil~ is the docstring placeholder (the docstring is the second argument).
+- ~:group 'external~ places this group under the "External" top-level group
+  in the customization hierarchy.
+- ~:prefix "opencode-"~ tells the customization system that all variables
+  in this group start with ~opencode-~, which helps with completion.
+
+*** Executable path
+
+The path to the ~opencode~ CLI binary. This is the program that Emacs will
+launch as a subprocess. It defaults to ~"opencode"~, which means Emacs will
+look for it in your ~PATH~.
+
+#+BEGIN_SRC emacs-lisp
+(defcustom opencode-executable "opencode"
+  "Path to the opencode executable."
+  :type 'file
+  :group 'opencode)
+#+END_SRC
+
+- ~defcustom~ is like ~defvar~ but for user-facing settings. It declares a
+  variable that users can change via ~M-x customize-variable~ or by
+  setting it in their ~init.el~.
+- ~:type 'file~ tells the customize interface to show a file-picker widget.
+- ~:group 'opencode~ associates this with our customization group.
+
+*** Buffer name
+
+The name of the Emacs buffer where the conversation appears. Users can
+change this if ~*opencode*~ conflicts with another buffer name.
+
+#+BEGIN_SRC emacs-lisp
+(defcustom opencode-buffer-name "*opencode*"
+  "Name of the OpenCode interaction buffer."
+  :type 'string
+  :group 'opencode)
+#+END_SRC
+
+*** ACP arguments
+
+Command-line arguments passed to the ~opencode~ executable. The ~"acp"~
+argument tells it to run in ACP mode, which means it reads JSON-RPC
+on stdin and writes responses on stdout (as opposed to running as an
+interactive terminal program).
+
+#+BEGIN_SRC emacs-lisp
+(defcustom opencode-args '("acp")
+  "Arguments passed to `opencode-executable' for the ACP subprocess."
+  :type '(repeat string)
+  :group 'opencode)
+#+END_SRC
+
+~:type '(repeat string)~ means "a list of strings".
+
+*** Faces for text display
+
+In Emacs, a "face" is a named collection of display properties: font
+family, size, weight, foreground color, background color, etc. Faces
+are applied to text with the ~propertize~ function or through overlays.
+
+**User face** -- for the user's own messages (teal/cyan bold):
+
+#+BEGIN_SRC emacs-lisp
+(defface opencode-user-face
+  '((t :inherit bold :foreground "#4EC9B0"))
+  "Face for user messages."
+  :group 'opencode)
+#+END_SRC
+
+**Agent face** -- for the AI's response text (blue bold):
+
+#+BEGIN_SRC emacs-lisp
+(defface opencode-agent-face
+  '((t :inherit bold :foreground "#569CD6"))
+  "Face for agent messages."
+  :group 'opencode)
+#+END_SRC
+
+**Thought face** -- for the AI's internal reasoning (italic, dimmed).
+The ~:inherit shadow~ part inherits from the theme's "shadow" face,
+which is usually a gray/dimmed color:
+
+#+BEGIN_SRC emacs-lisp
+(defface opencode-thought-face
+  '((t :inherit shadow :italic t))
+  "Face for agent thought chunks."
+  :group 'opencode)
+#+END_SRC
+
+**Toggle thoughts** -- a user option to control whether thinking chunks
+are shown. Disabled by default because thoughts can be verbose:
+
+#+BEGIN_SRC emacs-lisp
+(defcustom opencode-show-thoughts nil
+  "If non-nil, display the model's internal thinking/reasoning.
+The thinking text is shown with `opencode-thought-face' (italic shadowed)."
+  :type 'boolean
+  :group 'opencode)
+#+END_SRC
+
+A ~boolean~ means the customize widget will be a checkbox.
+
+**Tool face** -- for tool-call status lines (e.g., ~[running] grep~).
+It inherits from ~font-lock-builtin-face~, a standard Emacs face:
+
+#+BEGIN_SRC emacs-lisp
+(defface opencode-tool-face
+  '((t :inherit font-lock-builtin-face))
+  "Face for tool call status."
+  :group 'opencode)
+#+END_SRC
+
+** 3.5 Internal State Variables
+
+These variables track the internal state of the ACP connection. They use
+the ~opencode--~ naming convention (double dash), which in Emacs Lisp
+convention means "private -- do not touch from outside this package".
+
+*** Process object
+
+The actual Emacs process object for the ~opencode acp~ subprocess. Created
+by ~make-process~ and used by ~process-send-string~ to write data.
+
+#+BEGIN_SRC emacs-lisp
+(defvar opencode--process nil
+  "ACP subprocess object.")
+#+END_SRC
+
+*** Session ID
+
+After the ~session/new~ handshake, the agent returns an ID string that
+identifies this conversation. We store it here and include it in every
+subsequent ~session/prompt~ request.
+
+#+BEGIN_SRC emacs-lisp
+(defvar opencode--session-id nil
+  "Current ACP session ID (string).")
+#+END_SRC
+
+*** RPC ID counter
+
+Every JSON-RPC request we send gets a unique integer ID. This counter
+starts at 0 and increments with each request. The ID lets us match
+responses to the callbacks we stored.
+
+#+BEGIN_SRC emacs-lisp
+(defvar opencode--rpc-id 0
+  "Next JSON-RPC request ID.")
+#+END_SRC
+
+*** Pending callbacks
+
+An "alist" (association list) that maps request IDs to callback functions.
+When a response arrives, we look up the ID, call the callback, and remove
+the entry.
+
+#+BEGIN_SRC emacs-lisp
+(defvar opencode--rpc-callbacks nil
+  "Alist of (id . FUNCTION) for pending request callbacks.")
+#+END_SRC
+
+*** Accumulator buffer
+
+The subprocess sends data in arbitrary-sized chunks. We cannot parse
+partial JSON. So we accumulate raw data in a hidden buffer (the leading
+space hides it from ~list-buffers~) and extract complete lines.
+
+#+BEGIN_SRC emacs-lisp
+(defvar opencode--accumulator nil
+  "Buffer for accumulating incomplete stdout lines.")
+#+END_SRC
+
+*** Pending prompt flag
+
+A boolean: ~t~ while we have sent a ~session/prompt~ and are waiting for
+the response. This prevents sending a second prompt before the first
+finishes.
+
+#+BEGIN_SRC emacs-lisp
+(defvar opencode--pending-prompt nil
+  "Non-nil while awaiting a session/prompt response.")
+#+END_SRC
+
+*** Response start marker
+
+A marker pointing to where the current streaming response began in the
+buffer. Useful for future features like "replace the last response".
+
+#+BEGIN_SRC emacs-lisp
+(defvar opencode--response-start nil
+  "Marker at the start of the current streaming response.")
+#+END_SRC
+
+*** Ready flag
+
+~t~ when both initialization and session creation are done, and we are
+ready to accept prompts.
+
+#+BEGIN_SRC emacs-lisp
+(defvar opencode--ready nil
+  "Non-nil when initialized and session is active.")
+#+END_SRC
+
+*** Tool status tracking
+
+An alist mapping each tool-call ID (a string) to its ~(title . status)~.
+Status values include ~"pending"~, ~"running"~, ~"success"~, ~"error"~.
+
+#+BEGIN_SRC emacs-lisp
+(defvar opencode--tool-status nil
+  "Alist of (tool-call-id . (title . status)) for active tool calls.")
+#+END_SRC
+
+*** Tool markers
+
+An alist mapping each tool-call ID to a buffer marker. The marker points
+to the line in the conversation buffer showing that tool's status. When
+the status changes, we use the marker to update the line /in-place/.
+
+#+BEGIN_SRC emacs-lisp
+(defvar opencode--tool-markers nil
+  "Alist of (tool-call-id . marker) for tool status lines.")
+#+END_SRC
+
+*** Working directory
+
+The directory for the ACP session. Defaults to ~default-directory~ of the
+buffer where ~opencode~ was first called. Users can change it with
+~opencode-set-cwd~, which restarts the session.
+
+#+BEGIN_SRC emacs-lisp
+(defvar opencode--cwd nil
+  "Working directory for the current session.")
+#+END_SRC
+
+*** Shutting-down flag
+
+Set to ~t~ before we /intentionally/ kill the process. The process
+sentinel checks this: if it is nil and the process dies, a warning is
+shown (it was an unexpected crash).
+
+#+BEGIN_SRC emacs-lisp
+(defvar opencode--shutting-down nil
+  "Non-nil during intentional shutdown (suppresses sentinel warnings).")
+#+END_SRC
+
+*** Last chunk type
+
+Remembers whether the last chunk we displayed was a ~thought~ or a
+~message~. When switching from thought to message, we insert a blank line
+for visual separation.
+
+#+BEGIN_SRC emacs-lisp
+(defvar opencode--last-chunk-type nil
+  "Type of the last content chunk (\\='thought or \\='message).")
+#+END_SRC
+
+*** Pending queue
+
+If the user sends a prompt before the session is fully initialized, the
+prompt gets queued here. When the session becomes ready, the queue is
+flushed automatically.
+
+Each element is a list ~(prompt-text context-text context-filename)~.
+
+#+BEGIN_SRC emacs-lisp
+(defvar opencode--pending-queue nil
+  "Queue of (prompt-text context-text context-filename) waiting for session.")
+#+END_SRC
+
+*** Status string
+
+A short string shown in the header line: ~"disconnected"~, ~"connecting"~,
+~"ready"~, or ~"processing"~.
+
+#+BEGIN_SRC emacs-lisp
+(defvar opencode--status "disconnected"
+  "Visible status string shown in the header line.
+One of: \"disconnected\", \"connecting\", \"ready\", \"processing\".")
+#+END_SRC
+
+** 3.6 JSON Helper Functions
+
+The built-in ~json.el~ library in Emacs can encode and decode JSON, but
+the default settings produce pretty-printed (multi-line) output. For a
+line-oriented protocol like ACP (one JSON message per line), we want
+compact single-line output. These helper functions provide a consistent
+interface.
+
+*** JSON encoding
+
+~opencode--json-encode~ converts an Emacs Lisp data structure into a
+compact JSON string. The ~let~ bindings override the default ~json.el~
+settings:
+
+- ~json-encoding-pretty-print~: nil means "one line, no indentation".
+- ~json-encoding-fringep~: nil means "no extra whitespace around brackets".
+- ~json-encoding-separator~: ~","~ (the standard JSON separator).
+
+This produces output like ~{"key":"value","nums":[1,2,3]}~ (single line).
+
+#+BEGIN_SRC emacs-lisp
+(defun opencode--json-encode (data)
+  "Encode DATA to a JSON string with default settings."
+  (let ((json-encoding-pretty-print nil)
+        (json-encoding-fringep nil)
+        (json-encoding-separator ","))
+    (json-encode data)))
+#+END_SRC
+
+*** JSON decoding
+
+~opencode--json-decode~ converts a JSON string back to an Emacs Lisp
+alist. It wraps ~json-read-from-string~ in a ~condition-case~ error
+handler: if the JSON is malformed, it returns ~nil~ instead of crashing.
+
+#+BEGIN_SRC emacs-lisp
+(defun opencode--json-decode (string)
+  "Decode STRING as JSON, returning an alist."
+  (condition-case nil
+      (json-read-from-string string)
+    (error nil)))
+#+END_SRC
+
+*** Safe alist access
+
+JSON-RPC messages are decoded into alists (like ~((key1 . val1) (key2 .
+val2) ...)~). ~opencode--json-get~ retrieves a value by key (a symbol)
+from such an alist. It uses ~assq~ (which uses ~eq~ for comparison) for
+speed, since we only ever look up keyword symbols.
+
+#+BEGIN_SRC emacs-lisp
+(defun opencode--json-get (key alist)
+  "Get KEY (a symbol) from ALIST."
+  (cdr (assq key alist)))
+#+END_SRC
+
+** 3.7 Process Management
+
+The ACP protocol runs over stdin/stdout of a subprocess. These functions
+handle the lifecycle of that subprocess: sending data to it, receiving
+data from it, starting it, and stopping it.
+
+*** Sending data to the process
+
+~opencode--process-send~ writes a string followed by a newline to the
+subprocess's stdin. The newline is important: ACP uses
+newline-delimited JSON, meaning each message is terminated by ~\n~.
+
+The ~process-live-p~ guard prevents errors if the process died
+unexpectedly.
+
+#+BEGIN_SRC emacs-lisp
+(defun opencode--process-send (string)
+  "Send STRING followed by newline to the ACP subprocess."
+  (when (process-live-p opencode--process)
+    (process-send-string opencode--process string)
+    (process-send-string opencode--process "\n")))
+#+END_SRC
+
+*** The accumulator buffer
+
+~opencode--acc-buffer~ returns a hidden buffer where we accumulate
+incomplete lines from the subprocess's stdout. If the buffer has been
+killed (unlikely but possible), it creates a new one.
+
+The buffer name ~" *opencode-acc*"~ starts with a space, which tells Emacs
+to hide it from ~list-buffers~ and other UI elements.
+
+#+BEGIN_SRC emacs-lisp
+(defun opencode--acc-buffer ()
+  "Get or create the accumulator buffer."
+  (or (and (buffer-live-p opencode--accumulator) opencode--accumulator)
+      (setq opencode--accumulator
+            (generate-new-buffer " *opencode-acc*"))))
+#+END_SRC
+
+*** The process filter
+
+This is the heart of receiving data from the AI agent. Emacs calls
+~opencode--process-filter~ whenever the subprocess writes to stdout.
+Here is how it works:
+
+1. Append the new chunk of data to the accumulator buffer.
+2. Scan forward looking for newline characters.
+3. For each newline found, extract the complete line before it, remove
+   that line from the buffer, and dispatch it to ~opencode--handle-raw-message~.
+4. Leave any trailing data (after the last newline) in the buffer to be
+   completed when the next chunk arrives.
+
+This is a common pattern called "line accumulation" or "framing". It
+handles the fact that a single ~write()~ from the subprocess might contain
+one line, half a line, or many lines.
+
+#+BEGIN_SRC emacs-lisp
+(defun opencode--process-filter (proc string)
+  "Accumulate and parse newline-delimited JSON from ACP process."
+  (when (buffer-live-p (opencode--acc-buffer))
+    (with-current-buffer (opencode--acc-buffer)
+      (goto-char (point-max))
+      (insert string)
+      (goto-char (point-min))
+      (while (re-search-forward "\n" nil t)
+        (let ((line (buffer-substring-no-properties (point-min) (1- (point)))))
+          (delete-region (point-min) (point))
+          (opencode--handle-raw-message line))))))
+#+END_SRC
+
+Key details of the algorithm:
+
+- ~(goto-char (point-max)) (insert string)~ -- append to the buffer.
+- ~(goto-char (point-min))~ -- go back to the start.
+- ~(re-search-forward "\n" nil t)~ -- find each newline.
+- ~(buffer-substring-no-properties (point-min) (1- (point)))~ -- extract
+  everything from the start up to (but not including) the newline.
+- ~(delete-region (point-min) (point))~ -- remove the extracted line.
+- ~(opencode--handle-raw-message line)~ -- process the complete line.
+
+*** The process sentinel
+
+Emacs calls ~opencode--process-sentinel~ whenever the subprocess's state
+changes (it exits, is killed, or crashes). This function:
+
+1. Resets all state variables (so we start fresh next time).
+2. Updates the header line to ~"disconnected"~.
+3. Logs the exit in the conversation buffer.
+4. If the exit was unexpected (not during intentional shutdown) and with a
+   non-zero status, shows a warning to the user.
+
+#+BEGIN_SRC emacs-lisp
+(defun opencode--process-sentinel (proc event)
+  "Handle ACP process termination."
+  (when (string-match-p "finished\\|exited\\|killed\\|abnormal\\|failed" event)
+    (let ((status (process-exit-status proc)))
+      (setq opencode--process nil
+            opencode--ready nil
+            opencode--session-id nil
+            opencode--pending-prompt nil
+            opencode--status "disconnected")
+      (opencode--update-header)
+      (when (get-buffer opencode-buffer-name)
+        (with-current-buffer (get-buffer opencode-buffer-name)
+          (let ((inhibit-read-only t))
+            (goto-char (point-max))
+            (insert (format "\n;; ACP process exited (status %d)\n" status)))))
+      (unless opencode--shutting-down
+        (when (and status (/= 0 status))
+          (display-warning 'opencode
+            (format "OpenCode ACP process exited with status %d" status)
+            :warning))))))
+#+END_SRC
+
+The ~event~ parameter is a string like ~"finished\n"~ or ~"exited abnormally\n"~.
+We use ~string-match-p~ to check if it contains any of the termination
+indicators.
+
+*** Starting the process
+
+~opencode--start-process~ creates the subprocess. It performs several
+important setup steps:
+
+1. If a process is already running, kill it first.
+2. If an accumulator buffer exists, kill it too (start fresh).
+3. Set status to ~"connecting"~.
+4. Reset all RPC state (callbacks, ID counter, session ID).
+5. Create the process with:
+
+   - ~process-connection-type nil~ -- use a pipe, not a PTY. A PTY would
+     interfere with line-buffering and JSON framing.
+   - ~:buffer nil~ -- do not capture stdout into an Emacs buffer; we
+     handle it ourselves via the ~:filter~ function.
+   - ~:filter #'opencode--process-filter~ -- our line-accumulation filter.
+   - ~:sentinel #'opencode--process-sentinel~ -- our exit handler.
+   - ~:stderr~ -- send stderr to a separate hidden buffer for debugging.
+   - ~:noquery t~ -- do not ask "Active processes exist; quit anyway?"
+     when exiting Emacs.
+   - ~:coding 'utf-8-emacs-unix~ -- ensure correct Unicode handling.
+
+#+BEGIN_SRC emacs-lisp
+(defun opencode--start-process ()
+  "Start the ACP subprocess."
+  (when (process-live-p opencode--process)
+    (delete-process opencode--process))
+  (when (buffer-live-p opencode--accumulator)
+    (kill-buffer opencode--accumulator))
+  (setq opencode--status "connecting")
+  (opencode--update-header)
+  (setq opencode--rpc-callbacks nil
+        opencode--rpc-id 0
+        opencode--session-id nil
+        opencode--pending-prompt nil
+        opencode--ready nil
+        opencode--tool-status nil
+        opencode--tool-markers nil)
+  (let* ((process-connection-type nil)
+         (proc (make-process
+                :name "opencode-acp"
+                :buffer nil
+                :command (cons opencode-executable opencode-args)
+                :filter #'opencode--process-filter
+                :sentinel #'opencode--process-sentinel
+                :stderr (generate-new-buffer " *opencode-stderr*")
+                :noquery t
+                :coding 'utf-8-emacs-unix)))
+    (setq opencode--process proc)
+    proc))
+#+END_SRC
+
+*** Stopping the process
+
+~opencode--stop-process~ gracefully shuts down the subprocess:
+
+1. Set ~opencode--shutting-down~ to ~t~ so the sentinel does not warn.
+2. Kill the process (if alive).
+3. Kill the accumulator buffer.
+4. Reset all state variables to defaults.
+5. Update the header.
+
+#+BEGIN_SRC emacs-lisp
+(defun opencode--stop-process ()
+  "Stop the ACP subprocess and clean up."
+  (setq opencode--shutting-down t)
+  (when (process-live-p opencode--process)
+    (delete-process opencode--process))
+  (when (buffer-live-p opencode--accumulator)
+    (kill-buffer opencode--accumulator))
+  (setq opencode--process nil
+        opencode--session-id nil
+        opencode--ready nil
+        opencode--pending-prompt nil
+        opencode--rpc-callbacks nil
+        opencode--tool-status nil
+        opencode--tool-markers nil
+        opencode--status "disconnected"
+        opencode--shutting-down nil)
+  (opencode--update-header))
+#+END_SRC
+
+** 3.8 JSON-RPC Layer
+
+ACP uses JSON-RPC 2.0. There are two kinds of messages:
+
+- **Requests**: have an ~id~ field. The receiver MUST reply with a
+  Response that has the same ~id~.
+- **Notifications**: have no ~id~. The receiver does NOT reply.
+
+These two functions send them, and the dispatch router handles incoming
+messages.
+
+*** Sending a request
+
+~opencode--send-request~ increments the RPC ID counter, stores an
+optional callback in ~opencode--rpc-callbacks~, JSON-encodes the message,
+and writes it to the subprocess's stdin.
+
+The callback receives two arguments: ~(RESULT ERROR)~.
+- ~RESULT~ is the decoded "result" field from the response (or nil on error).
+- ~ERROR~ is a string describing the error (or nil on success).
+
+#+BEGIN_SRC emacs-lisp
+(defun opencode--send-request (method params &optional callback)
+  "Send a JSON-RPC request.  If CALLBACK is given, call it with (RESULT ERROR) upon response."
+  (setq opencode--rpc-id (1+ opencode--rpc-id))
+  (let ((id opencode--rpc-id))
+    (when callback
+      (push (cons id callback) opencode--rpc-callbacks))
+    (opencode--process-send
+     (opencode--json-encode
+      `((jsonrpc . "2.0")
+        (id . ,id)
+        (method . ,method)
+        (params . ,params))))
+    id))
+#+END_SRC
+
+Notice the backtick (~`~) and comma (~,~) syntax: this is "backquote
+splicing" in Emacs Lisp. It's like a template where ~,id~, ~,method~, and
+~,params~ are filled in at runtime.
+
+*** Sending a notification
+
+~opencode--send-notification~ is like sending a request, but without an
+~id~ field. Since there is no response expected, there is no callback.
+
+#+BEGIN_SRC emacs-lisp
+(defun opencode--send-notification (method params)
+  "Send a JSON-RPC notification (no response expected)."
+  (let ((msg (opencode--json-encode
+              `((jsonrpc . "2.0")
+                (method . ,method)
+                (params . ,params)))))
+    (opencode--process-send msg)))
+#+END_SRC
+
+*** Parsing an incoming line
+
+~opencode--handle-raw-message~ takes a single line of JSON (from the
+accumulator) and dispatches it. It is wrapped in ~condition-case~ so a
+malformed line does not crash the filter -- it just logs a debug warning.
+
+#+BEGIN_SRC emacs-lisp
+(defun opencode--handle-raw-message (line)
+  "Parse and dispatch a single JSON-RPC message LINE."
+  (condition-case err
+      (let ((msg (opencode--json-decode line)))
+        (when msg
+          (opencode--dispatch-message msg)))
+    (error
+     (display-warning 'opencode
+       (format "JSON parse error: %s\nLine: %s"
+               (error-message-string err) (truncate-string-to-width line 120))
+       :debug))))
+#+END_SRC
+
+*** Dispatching a message
+
+~opencode--dispatch-message~ routes a parsed JSON-RPC message to the
+right handler. There are three cases:
+
+1. **Response to a request**: has an ~id~ field but no ~method~ field. We
+   look up the ID in ~opencode--rpc-callbacks~, call the callback with
+   (result error), and remove the entry.
+
+2. **Notification from the subprocess**: has a ~method~ field but no ~id~
+   field. We pass it to ~opencode--handle-notification~.
+
+3. **Error response with no matching ID**: log it with ~message~.
+
+Note: JSON-RPC 2.0 also allows "Request" messages sent /by/ the
+subprocess (both ~id~ and ~method~). This code treats those as
+notifications (ignores the request aspect), which works fine for
+OpenCode's ACP implementation since the subprocess never sends requests.
+
+#+BEGIN_SRC emacs-lisp
+(defun opencode--dispatch-message (msg)
+  "Dispatch a parsed JSON-RPC message."
+  (let* ((id (opencode--json-get 'id msg))
+         (method (opencode--json-get 'method msg))
+         (result (opencode--json-get 'result msg))
+         (error-obj (opencode--json-get 'error msg)))
+    (cond
+     ((and id (not method))
+      (let ((pair (assq id opencode--rpc-callbacks)))
+        (when pair
+          (setq opencode--rpc-callbacks (delq pair opencode--rpc-callbacks))
+          (funcall (cdr pair) result (and error-obj
+                                          (opencode--json-get 'message error-obj))))))
+     ((and method (not id))
+      (opencode--handle-notification method (opencode--json-get 'params msg)))
+     (error-obj
+      (message "OpenCode RPC error: %s" (opencode--json-get 'message error-obj))))))
+#+END_SRC
+
+*** Handling notifications
+
+Notifications are dispatched by their ~method~ name. Currently, only
+~"session/update"~ is handled -- this is the streaming update
+notification. Unknown methods are logged for debugging.
+
+#+BEGIN_SRC emacs-lisp
+(defun opencode--handle-notification (method params)
+  "Handle a JSON-RPC notification."
+  (pcase method
+    ("session/update"
+     (opencode--handle-update params))
+    (_
+     (message "OpenCode: unhandled notification: %s" method))))
+#+END_SRC
+
+The ~pcase~ macro is Emacs Lisp's pattern-matching construct. It's like
+~switch~ in C or ~match~ in Rust.
+
+** 3.9 ACP Session Management
+
+Before we can send prompts, we must establish an ACP session. The
+handshake has two steps:
+
+1. **Initialize**: negotiate protocol version and capabilities.
+2. **Create session**: create a conversation tied to a working directory.
+
+Each step is asynchronous: we send a request and proceed when the
+response arrives via the callback.
+
+*** Step 1: Send "initialize"
+
+~opencode--acp-initialize~ sends the ~initialize~ request. It tells the
+agent:
+
+- We support protocol version 1.
+- We are ~emacs-opencode~, version ~0.1.0~.
+- We have no special capabilities (empty hash table for ~clientCapabilities~).
+
+On success, it calls ~opencode--on-initialized~. On failure, it displays
+the error.
+
+#+BEGIN_SRC emacs-lisp
+(defun opencode--acp-initialize ()
+  "Initialize the ACP connection."
+  (opencode--send-request
+   "initialize"
+   `((protocolVersion . 1)
+     (clientCapabilities . ,(make-hash-table :test 'equal))
+     (clientInfo . ((name . "emacs-opencode")
+                    (version . "0.1.0"))))
+   (lambda (result error-msg)
+     (if error-msg
+         (opencode--buffer-insert
+          (format ";; Initialize failed: %s\n" error-msg))
+       (opencode--on-initialized result)))))
+#+END_SRC
+
+The callback is a lambda (anonymous function) that takes ~result~ and
+~error-msg~. In Emacs Lisp, ~(lambda (args) body)~ creates an anonymous
+function, just like ~(args) => body~ in JavaScript or ~def args: body~ in
+Python.
+
+*** Handle "initialize" response
+
+~opencode--on-initialized~ extracts the agent's info (name, version)
+from the response, displays it in the buffer, and immediately proceeds
+to Step 2: creating a session.
+
+#+BEGIN_SRC emacs-lisp
+(defun opencode--on-initialized (result)
+  "Handle the initialize response."
+  (let ((agent-info (opencode--json-get 'agentInfo result))
+        (auth-methods (opencode--json-get 'authMethods result))
+        (caps (opencode--json-get 'agentCapabilities result)))
+    (opencode--buffer-insert
+     (format ";; OpenCode %s\n"
+             (or (opencode--json-get 'version agent-info) "connected")))
+    (opencode--acp-create-session)))
+#+END_SRC
+
+*** Step 2: Send "session/new"
+
+~opencode--acp-create-session~ sends the ~session/new~ request with:
+
+- ~cwd~: the working directory (defaults to ~default-directory~ or the
+  user-set ~opencode--cwd~).
+- ~mcpServers~: an empty array (we do not configure MCP servers).
+
+On success, it calls ~opencode--on-session-ready~. On failure, it
+displays the error.
+
+#+BEGIN_SRC emacs-lisp
+(defun opencode--acp-create-session ()
+  "Create a new ACP session."
+  (let ((cwd (or opencode--cwd default-directory)))
+    (opencode--send-request
+     "session/new"
+      `((cwd . ,cwd)
+        (mcpServers . []))
+     (lambda (result error-msg)
+       (if error-msg
+           (opencode--buffer-insert
+            (format ";; Session creation failed: %s\n" error-msg))
+         (opencode--on-session-ready result))))))
+#+END_SRC
+
+*** Handle "session/new" response
+
+~opencode--on-session-ready~ saves the session ID, sets ~opencode--ready~
+to ~t~, updates the status, and -- importantly -- **flushes the pending
+queue**.
+
+The pending queue accumulates prompts that the user sent before the
+session was ready. We reverse the queue (because ~push~ prepends, making
+it a LIFO stack) and process them in FIFO order.
+
+#+BEGIN_SRC emacs-lisp
+(defun opencode--on-session-ready (result)
+  "Handle the session/new response."
+  (setq opencode--session-id (opencode--json-get 'sessionId result)
+        opencode--ready t
+        opencode--status "ready")
+  (opencode--update-header)
+  (opencode--buffer-insert
+   (format ";; Session: %s\n" opencode--session-id))
+  (opencode--buffer-insert ";; Ready.\n")
+  (when opencode--pending-queue
+    (opencode--buffer-insert ";; Processing queued prompts...\n")
+    (let ((queue (nreverse opencode--pending-queue)))
+      (setq opencode--pending-queue nil)
+      (dolist (args queue)
+        (apply #'opencode--send-prompt-internal args)))))
+#+END_SRC
+
+** 3.10 Prompt Handling
+
+These functions handle the lifecycle of a user prompt: queuing it if the
+session is not ready, sending it when ready, and processing the response.
+
+*** Public entry point: ~opencode--do-send-prompt~
+
+This is the public entry point for sending a prompt. It handles three
+cases:
+
+1. **Session not ready**: queue the prompt (push onto the front of the
+   list) and ensure the connection is being established.
+2. **Already pending**: signal an error -- we do not allow concurrent
+   prompts (the ACP protocol processes one prompt turn at a time).
+3. **Session ready and idle**: send immediately via
+   ~opencode--send-prompt-internal~.
+
+The ~context-text~ and ~context-filename~ are optional: they carry code
+or file content that the user selected (via ~opencode-ask~), packaged as
+a "resource" content block.
+
+#+BEGIN_SRC emacs-lisp
+(defun opencode--do-send-prompt (prompt-text &optional context-text context-filename)
+  "Send PROMPT-TEXT to the current ACP session.
+Queues the prompt if the session is still initializing.
+Optional CONTEXT-TEXT and CONTEXT-FILENAME provide file context."
+  (cond
+   ((not opencode--ready)
+    (push (list prompt-text context-text context-filename) opencode--pending-queue)
+    (opencode--buffer-insert
+     (format ";; Queued: \"%s\" (connecting)...\n"
+             (truncate-string-to-width prompt-text 60 nil nil t)))
+    (opencode--ensure-connected))
+   (opencode--pending-prompt
+    (user-error "Already waiting for a response"))
+   (t
+    (opencode--send-prompt-internal prompt-text context-text context-filename))))
+#+END_SRC
+
+*** Internal send function
+
+~opencode--send-prompt-internal~ is called when the session is
+definitely ready. Here is what it does step by step:
+
+1. Set ~opencode--pending-prompt~ to ~t~ (prevent concurrent prompts).
+2. Reset tool-status tracking for the new turn.
+3. Build the content blocks: an optional "resource" block for context
+   text, followed by a "text" block for the prompt itself.
+4. Insert the user's message with a "You" header.
+5. Create a marker at the end of the buffer (where the response will
+   start streaming in) and save it as ~opencode--response-start~.
+6. Insert an "OpenCode" header.
+7. Send the ~session/prompt~ JSON-RPC request.
+8. Scroll to the bottom to show the latest content.
+
+The "resource" block includes the context text with a ~file://~ URI so
+the agent knows the source. If no filename is provided, ~*selection*~ is
+used.
+
+#+BEGIN_SRC emacs-lisp
+(defun opencode--send-prompt-internal (prompt-text &optional context-text context-filename)
+  "Internal: actually send the prompt (session is ready)."
+  (setq opencode--pending-prompt t
+        opencode--tool-status nil
+        opencode--tool-markers nil
+        opencode--last-chunk-type nil
+        opencode--status "processing")
+  (opencode--update-header)
+  (let ((inhibit-read-only t))
+    (let* ((content-blocks
+            (append
+             (when (and context-text (not (string-blank-p context-text)))
+               (list
+                `((type . "resource")
+                  (resource . ((uri . ,(concat "file:///"
+                                               (or context-filename "*selection*")))
+                               (mimeType . "text/plain")
+                               (text . ,context-text))))))
+             (list `((type . "text") (text . ,prompt-text)))))
+           (_ (opencode--buffer-insert-user-message prompt-text context-text))
+         (start (with-current-buffer (get-buffer-create opencode-buffer-name)
+                  (let ((inhibit-read-only t))
+                    (goto-char (point-max))
+                    (let ((p (point-marker)))
+                      (opencode--insert-header "OpenCode" 'opencode-agent-face)
+                      p)))))
+    (setq opencode--response-start start)
+    (opencode--send-request
+       "session/prompt"
+       `((sessionId . ,opencode--session-id)
+         (prompt . ,content-blocks))
+       (lambda (result error-msg)
+         (opencode--on-prompt-done result error-msg))))
+    (opencode--scroll-to-bottom)))
+#+END_SRC
+
+*** Prompt completion callback
+
+~opencode--on-prompt-done~ is called when the ~session/prompt~ response
+arrives (meaning the prompt turn is fully complete). It:
+
+1. Checks for a ~stopReason~ in the result (informational).
+2. Displays any error message.
+3. Clears the pending-prompt flag and resets tool-tracking state.
+4. Sets status back to ~"ready"~.
+
+#+BEGIN_SRC emacs-lisp
+(defun opencode--on-prompt-done (result error-msg)
+  "Handle the session/prompt response."
+  (let ((stop-reason (and result (opencode--json-get 'stopReason result))))
+    (when (and error-msg (not (string-blank-p error-msg)))
+      (opencode--buffer-insert
+       (format ";; Error: %s\n" error-msg)))
+    (setq opencode--pending-prompt nil
+          opencode--response-start nil
+          opencode--tool-status nil
+          opencode--tool-markers nil
+          opencode--status "ready")
+    (opencode--update-header)))
+#+END_SRC
+
+*** Cancelling a prompt
+
+~opencode-cancel~ sends a ~session/cancel~ notification. Since this is a
+notification (no response expected), we use ~opencode--send-notification~.
+It only sends if there is an active session and a pending prompt.
+
+#+BEGIN_SRC emacs-lisp
+(defun opencode-cancel ()
+  "Cancel the current prompt turn."
+  (interactive)
+  (when (and opencode--session-id opencode--pending-prompt)
+    (opencode--send-notification
+     "session/cancel"
+     `((sessionId . ,opencode--session-id)))
+    (message "Cancelling...")))
+#+END_SRC
+
+** 3.11 Streaming Update Handling
+
+After a ~session/prompt~ is sent, the agent streams back
+~session/update~ notifications. These are the "live" updates that make
+the UI feel responsive.
+
+*** Main dispatcher: ~opencode--handle-update~
+
+This function extracts the ~sessionUpdate~ object from the notification
+and dispatches by its ~type~ field:
+
+| Type | Handler | What it does |
+|------|---------|--------------|
+| ~agent_message_chunk~ | ~opencode--handle-content-chunk~ with agent face | Append text to buffer in blue |
+| ~agent_thought_chunk~ | ~opencode--handle-content-chunk~ with thought face | Append text in italic dim (only if ~opencode-show-thoughts~ is set) |
+| ~tool_call~ | ~opencode--handle-tool-call~ | Insert a tool status line |
+| ~tool_call_update~ | ~opencode--handle-tool-call-update~ | Update existing tool status line |
+| ~user_message_chunk~ | (ignore) | Already displayed when sent |
+| ~plan~, ~available_commands_update~ | (ignore) | Not rendered in current UI |
+
+#+BEGIN_SRC emacs-lisp
+(defun opencode--handle-update (params)
+  "Handle a session/update notification."
+  (let* ((update (opencode--json-get 'update params))
+         (type (opencode--json-get 'sessionUpdate update)))
+    (pcase type
+      ("agent_message_chunk"
+       (opencode--handle-content-chunk update 'opencode-agent-face))
+      ("agent_thought_chunk"
+       (when opencode-show-thoughts
+         (opencode--handle-content-chunk update 'opencode-thought-face)))
+      ("tool_call"
+       (opencode--handle-tool-call update))
+      ("tool_call_update"
+       (opencode--handle-tool-call-update update))
+      ("user_message_chunk"
+       nil)
+      (_
+       nil))))
+#+END_SRC
+
+*** Content chunk handler
+
+~opencode--handle-content-chunk~ appends a piece of text (either an
+agent message or a thought) to the conversation buffer. It applies the
+specified face using ~propertize~.
+
+Important detail: when switching from a "thought" chunk to a "message"
+chunk, we insert a blank line for visual separation. The
+~opencode--last-chunk-type~ variable tracks what we last displayed.
+
+#+BEGIN_SRC emacs-lisp
+(defun opencode--handle-content-chunk (update face)
+  "Append a content chunk from UPDATE to the buffer using FACE."
+  (let* ((content (opencode--json-get 'content update))
+         (type (opencode--json-get 'type content))
+         (text (opencode--json-get 'text content)))
+    (when (and (string= type "text") text)
+      (with-current-buffer (get-buffer-create opencode-buffer-name)
+        (let ((inhibit-read-only t))
+          (goto-char (point-max))
+          (when (and (eq face 'opencode-agent-face)
+                     (eq opencode--last-chunk-type 'thought))
+            (insert "\n"))
+          (setq opencode--last-chunk-type
+                (if (eq face 'opencode-thought-face) 'thought 'message))
+          (insert (propertize text 'face face))
+          (opencode--scroll-to-bottom))))))
+#+END_SRC
+
+*** Tool call handler
+
+When the agent starts a tool, we insert a status line like:
+
+#+BEGIN_SRC text :tangle no
+  [pending] grep search
+#+END_SRC
+
+We save:
+
+1. A ~marker~ pointing to this line (so we can update it in-place later).
+2. A ~(title . status)~ entry in ~opencode--tool-status~.
+
+Both are indexed by the tool-call ID (a string).
+
+#+BEGIN_SRC emacs-lisp
+(defun opencode--handle-tool-call (update)
+  "Handle a tool_call update."
+  (let* ((tool-id (opencode--json-get 'toolCallId update))
+         (title (or (opencode--json-get 'title update) ""))
+         (status (or (opencode--json-get 'status update) "pending")))
+    (with-current-buffer (get-buffer-create opencode-buffer-name)
+      (let ((inhibit-read-only t))
+        (goto-char (point-max))
+        (let ((marker (point-marker)))
+          (insert (propertize (format "  [%s] %s\n" status title)
+                              'face 'opencode-tool-face))
+          (setq opencode--tool-markers
+                (cons (cons tool-id marker)
+                      (assq-delete-all tool-id opencode--tool-markers)))
+          (setq opencode--tool-status
+                (cons (cons tool-id (cons title status))
+                      (assq-delete-all tool-id opencode--tool-status)))
+          (opencode--scroll-to-bottom))))))
+#+END_SRC
+
+Details:
+- ~point-marker~ creates a marker at the current cursor position (end of
+  buffer). Markers in Emacs automatically follow text insertions/deletions.
+- ~assq-delete-all~ removes any old entry with the same tool-call ID
+  before adding the new one, preventing duplicates.
+
+*** Tool call update handler
+
+When the agent reports a tool status change (e.g., ~"running"~ →
+~"success"~), we:
+
+1. Update the in-memory ~opencode--tool-status~ alist.
+2. Find the marker for this tool-call ID.
+3. Replace the text on that line in the buffer with the new status.
+
+This gives the user real-time feedback without adding new lines.
+
+#+BEGIN_SRC emacs-lisp
+(defun opencode--handle-tool-call-update (update)
+  "Handle a tool_call_update notification."
+  (let* ((tool-id (opencode--json-get 'toolCallId update))
+         (new-status (or (opencode--json-get 'status update) "")))
+    (setq opencode--tool-status
+          (let ((existing (assq tool-id opencode--tool-status)))
+            (if existing
+                (setcdr existing (cons (car (cdr existing)) new-status))
+              (cons (cons tool-id (cons "" new-status)) opencode--tool-status))))
+    (let ((marker (cdr (assq tool-id opencode--tool-markers))))
+      (when (and marker (marker-buffer marker))
+        (with-current-buffer (marker-buffer marker)
+          (let ((inhibit-read-only t))
+            (save-excursion
+              (goto-char marker)
+              (let* ((existing (assq tool-id opencode--tool-status))
+                     (entry (cdr existing))
+                     (title (car entry)))
+                (delete-region (line-beginning-position) (line-end-position))
+                (insert (propertize (format "  [%s] %s" new-status title)
+                                    'face 'opencode-tool-face))
+                (insert "\n"))))
+          (opencode--scroll-to-bottom))))))
+#+END_SRC
+
+*** Compatibility alias
+
+The old name ~opencode--handle-tool-status~ is preserved as an
+alias for backward compatibility:
+
+#+BEGIN_SRC emacs-lisp
+(define-obsolete-function-alias 'opencode--handle-tool-status
+  'opencode--handle-tool-call-update "0.1")
+#+END_SRC
+
+** 3.12 Buffer Display Functions
+
+These functions handle inserting text into the ~*opencode*~ buffer and
+managing its display. All insertions temporarily disable the buffer's
+read-only property with ~(let ((inhibit-read-only t)) ...)~.
+
+*** Inserting a header
+
+~opencode--insert-header~ creates a styled header line like:
+
+#+BEGIN_SRC text :tangle no
+<<< You [14:30:05] >>>
+#+END_SRC
+
+The ~format-time-string~ function (Emacs built-in) provides the current
+time. ~propertize~ applies the face to the header text.
+
+#+BEGIN_SRC emacs-lisp
+(defun opencode--insert-header (label face)
+  "Insert a message header with LABEL using FACE."
+  (let ((inhibit-read-only t)
+        (time (format-time-string "%H:%M:%S")))
+    (insert "\n" (propertize (format "<<< %s [%s] >>>\n" label time)
+                             'face face))
+    (insert "\n")))
+#+END_SRC
+
+*** Inserting plain text
+
+~opencode--buffer-insert~ inserts text at the end of the ~*opencode*~
+buffer. It checks whether the buffer exists (it might not, if the user
+has killed it) and scrolls to show the new text.
+
+#+BEGIN_SRC emacs-lisp
+(defun opencode--buffer-insert (text)
+  "Insert TEXT into the opencode buffer at the end."
+  (when (get-buffer opencode-buffer-name)
+    (with-current-buffer (get-buffer opencode-buffer-name)
+      (let ((inhibit-read-only t))
+        (goto-char (point-max))
+        (insert text)
+        (opencode--scroll-to-bottom)))))
+#+END_SRC
+
+*** Inserting a user message
+
+~opencode--buffer-insert-user-message~ inserts the user's prompt
+with a "You" header. If there is context text (code the user selected),
+it is displayed in the thought face (italic dimmed) before the prompt,
+visually separated by ~--~.
+
+#+BEGIN_SRC emacs-lisp
+(defun opencode--buffer-insert-user-message (prompt-text &optional context-text)
+  "Insert the user's PROMPT-TEXT and optional CONTEXT-TEXT into the buffer."
+  (with-current-buffer (get-buffer-create opencode-buffer-name)
+    (let ((inhibit-read-only t))
+      (opencode--insert-header "You" 'opencode-user-face)
+      (when (and context-text (not (string-blank-p context-text)))
+        (insert (propertize
+                 (format "  [Context]:\n%s\n--\n" context-text)
+                 'face 'opencode-thought-face)))
+      (insert prompt-text "\n"))))
+#+END_SRC
+
+*** Scrolling to bottom
+
+~opencode--scroll-to-bottom~ scrolls the ~*opencode*~ buffer window so
+the latest content is visible. ~recenter -1~ puts the last line at the
+bottom of the window.
+
+It only scrolls if the buffer is actually displayed in a window
+(otherwise there is nothing to scroll).
+
+#+BEGIN_SRC emacs-lisp
+(defun opencode--scroll-to-bottom ()
+  "Scroll the opencode buffer to show the latest content."
+  (when (get-buffer-window opencode-buffer-name)
+    (with-current-buffer opencode-buffer-name
+      (when (get-buffer-window (current-buffer))
+        (with-selected-window (get-buffer-window (current-buffer))
+          (goto-char (point-max))
+          (recenter -1))))))
+#+END_SRC
+
+*** Ensuring the buffer exists
+
+~opencode--ensure-buffer~ returns the ~*opencode*~ buffer, creating it
+and enabling ~opencode-mode~ if needed.
+
+#+BEGIN_SRC emacs-lisp
+(defun opencode--ensure-buffer ()
+  "Ensure the opencode buffer exists and is in opencode-mode."
+  (let ((buffer (get-buffer-create opencode-buffer-name)))
+    (with-current-buffer buffer
+      (unless (derived-mode-p 'opencode-mode)
+        (opencode-mode))
+      (setq buffer-read-only t))
+    buffer))
+#+END_SRC
+
+*** Ensuring the connection
+
+~opencode--ensure-connected~ is the "big red button": it ensures the
+ACP subprocess is running and a session exists. If the process is not
+alive, it:
+
+1. Ensures the ~*opencode*~ buffer exists.
+2. Inserts a "Starting..." message.
+3. Starts the process.
+4. Kicks off the ACP initialization handshake.
+
+This is called by ~opencode~ and ~opencode--do-send-prompt~ when they
+detect that we are not yet connected.
+
+#+BEGIN_SRC emacs-lisp
+(defun opencode--ensure-connected ()
+  "Ensure the ACP process is running and a session exists."
+  (unless (process-live-p opencode--process)
+    (let ((buffer (opencode--ensure-buffer)))
+      (with-current-buffer buffer
+        (let ((inhibit-read-only t))
+          (goto-char (point-max))
+          (if (= (point) (point-min))
+              (insert ";; Starting OpenCode ACP...\n")
+            (insert "\n;; Starting OpenCode ACP...\n")))))
+    (opencode--start-process)
+    (opencode--acp-initialize)))
+#+END_SRC
+
+** 3.13 Major Mode: opencode-mode
+
+~opencode-mode~ is a "major mode" in Emacs terminology. A major mode
+defines the behavior of a buffer: its key bindings, its display, and its
+purpose. ~opencode-mode~ is derived from ~special-mode~, which is the
+base mode for special-purpose buffers (like ~*Help*~, ~*Completions*~).
+
+*** Keymap
+
+The keymap defines the keyboard shortcuts available in the buffer.
+
+#+BEGIN_SRC emacs-lisp
+(defvar-keymap opencode-mode-map
+  :doc "Keymap for opencode-mode."
+  "C-c C-c" #'opencode-send-prompt
+  "C-c C-k" #'opencode-cancel
+  "C-c C-r" #'opencode-ask
+  "C-c C-q" #'opencode-quit
+  "C-c C-x" #'opencode-cancel
+  "C-c C-l" #'opencode-clear
+  "C-c C-p" #'opencode-send-prompt
+  "C-c C-t" #'opencode-toggle-thoughts
+  "g"        #'opencode
+  "?"        #'opencode-help)
+#+END_SRC
+
+Key bindings summary:
+
+| Key | Command | What it does |
+|-----|---------|--------------|
+| ~C-c C-c~, ~C-c C-p~ | ~opencode-send-prompt~ | Send a prompt to the AI |
+| ~C-c C-k~, ~C-c C-x~ | ~opencode-cancel~ | Cancel the current operation |
+| ~C-c C-r~ | ~opencode-ask~ | Ask about the selected region |
+| ~C-c C-q~ | ~opencode-quit~ | Kill buffer and process |
+| ~C-c C-l~ | ~opencode-clear~ | Clear the buffer display |
+| ~C-c C-t~ | ~opencode-toggle-thoughts~ | Toggle thought display |
+| ~g~ | ~opencode~ | Reconnect / switch to buffer |
+| ~?~ | ~opencode-help~ | Show help |
+
+*** Header line update
+
+The header line (like the mode line but attached to a specific buffer)
+shows the connection status with a visual indicator:
+
+| Status | Indicator |
+|--------|-----------|
+| disconnected | ~[--]~ |
+| connecting | ~[...]~ |
+| ready | ~[ok]~ |
+| processing | ~[**]~ |
+
+It also shows keybinding hints, generated by ~substitute-command-keys~.
+This function automatically converts internal key representations (like
+~\\<opencode-mode-map>\\`C-c C-c'~) into the actual key descriptions,
+respecting any user-defined rebindings.
+
+#+BEGIN_SRC emacs-lisp
+(defun opencode--update-header ()
+  "Refresh the header line with current status."
+  (when (get-buffer opencode-buffer-name)
+    (with-current-buffer (get-buffer opencode-buffer-name)
+      (when (derived-mode-p 'opencode-mode)
+        (let* ((status-str
+                (pcase opencode--status
+                  ("disconnected" "[--]")
+                  ("connecting"   "[...]")
+                  ("ready"        "[ok]")
+                  ("processing"   "[**]")
+                  (_ (format "[%s]" opencode--status))))
+               (status-face
+                (pcase opencode--status
+                  ("connecting" 'warning)
+                  ("ready"      'success)
+                  ("processing" 'opencode-thought-face)
+                  (_ 'font-lock-comment-face)))
+               (key-hints
+                (substitute-command-keys
+                 "\\<opencode-mode-map>\
+C-c C-c: send | C-c C-k: cancel | C-c C-r: ask | C-c C-t: thoughts | C-c C-q: quit")))
+          (setq-local header-line-format
+                      (list " " (propertize status-str 'face status-face)
+                            "  " key-hints)))))))
+#+END_SRC
+
+*** Mode definition
+
+~define-derived-mode~ creates the major mode. It inherits from
+~special-mode~, which gives us:
+
+- Read-only buffer by default.
+- ~q~ bound to ~quit-window~.
+- Font-lock disabled.
+- No ~electric-indent-mode~.
+
+Additionally, we:
+- Set ~truncate-lines~ to ~t~ (no line wrapping -- better for tool output).
+- Set up the header line via ~opencode--update-header~.
+
+#+BEGIN_SRC emacs-lisp
+(define-derived-mode opencode-mode special-mode "OpenCode"
+  "Major mode for interacting with OpenCode AI coding agent.
+
+Commands:
+\\{opencode-mode-map}"
+  (setq-local buffer-read-only t)
+  (setq-local truncate-lines t)
+  (opencode--update-header))
+#+END_SRC
+
+*** Help command
+
+A simple command that shows the full documentation for ~opencode-mode~,
+which includes the keymap listing:
+
+#+BEGIN_SRC emacs-lisp
+(defun opencode-help ()
+  "Show help for opencode-mode."
+  (interactive)
+  (describe-function 'opencode-mode))
+#+END_SRC
+
+** 3.14 Interactive Commands
+
+These are the commands that users invoke via ~M-x~ or keybindings. Each
+is marked with ~;;;###autoload~ so Emacs can load this file on demand
+when the command is first invoked.
+
+*** Main entry point: ~opencode~
+
+~opencode~ is the primary entry point. It ensures the buffer exists,
+ensures the connection is active, and switches to the ~*opencode*~ buffer.
+
+#+BEGIN_SRC emacs-lisp
+;;;###autoload
+(defun opencode ()
+  "Start OpenCode and switch to the *opencode* buffer."
+  (interactive)
+  (opencode--ensure-buffer)
+  (opencode--ensure-connected)
+  (pop-to-buffer opencode-buffer-name))
+#+END_SRC
+
+*** Send prompt
+
+~opencode-send-prompt~ reads a prompt string from the minibuffer (with
+history support), checks that it is not blank, ensures the connection,
+and sends the prompt.
+
+The ~interactive~ form ~(list (read-string "OpenCode prompt: " nil
+'opencode-prompt-history))~ reads a string from the user. The ~nil~ is
+the initial input (empty), and ~'opencode-prompt-history~ is the history
+list symbol (so ~M-p~ / ~M-n~ cycle through previous prompts).
+
+#+BEGIN_SRC emacs-lisp
+;;;###autoload
+(defun opencode-send-prompt (prompt)
+  "Send a PROMPT to OpenCode.  Interactively, reads from the minibuffer."
+  (interactive
+   (list (read-string "OpenCode prompt: " nil 'opencode-prompt-history)))
+  (when (string-blank-p prompt)
+    (user-error "Empty prompt"))
+  (opencode)
+  (opencode--do-send-prompt prompt)
+  (when opencode--ready
+    (message "Sent: %s" (truncate-string-to-width prompt 50 nil nil t))))
+#+END_SRC
+
+*** Ask about region
+
+~opencode-ask~ is the command used when you select code and want to ask
+the AI about it. It:
+
+1. Detects whether a region is active (~use-region-p~).
+2. If so, reads the region text and the buffer's filename.
+3. Prompts the user for a question.
+4. Sends both the question and the code context to the AI.
+
+If no region is active, it falls back to ~opencode-send-prompt~.
+
+#+BEGIN_SRC emacs-lisp
+;;;###autoload
+(defun opencode-ask (beg end)
+  "Ask OpenCode about the selected region.
+With no active region, falls back to `opencode-send-prompt'."
+  (interactive
+   (if (use-region-p)
+       (list (region-beginning) (region-end))
+     (list nil nil)))
+  (if (not (and beg end))
+      (call-interactively #'opencode-send-prompt)
+    (let* ((text (buffer-substring-no-properties beg end))
+           (filename (or (buffer-file-name) (buffer-name)))
+           (prompt (read-string
+                    (format "Ask about region (%d chars): " (length text))
+                    nil 'opencode-prompt-history)))
+      (opencode)
+      (opencode--do-send-prompt prompt text filename)
+      (when opencode--ready
+        (message "Sent to OpenCode with %d chars of context." (length text))))))
+#+END_SRC
+
+*** Toggle thoughts
+
+Toggles whether the AI's internal reasoning is displayed:
+
+#+BEGIN_SRC emacs-lisp
+;;;###autoload
+(defun opencode-toggle-thoughts ()
+  "Toggle display of model thinking/reasoning content."
+  (interactive)
+  (setq opencode-show-thoughts (not opencode-show-thoughts))
+  (message "OpenCode thoughts: %s"
+           (if opencode-show-thoughts "shown" "hidden"))
+  (opencode--update-header))
+#+END_SRC
+
+*** Clear buffer
+
+Clears all visible text from the ~*opencode*~ buffer. The buffer remains
+connected -- this only clears the display.
+
+#+BEGIN_SRC emacs-lisp
+;;;###autoload
+(defun opencode-clear ()
+  "Clear the *opencode* buffer."
+  (interactive)
+  (let ((buffer (get-buffer opencode-buffer-name)))
+    (when buffer
+      (with-current-buffer buffer
+        (let ((inhibit-read-only t))
+          (delete-region (point-min) (point-max))
+          (insert (format ";; Buffer cleared\n")))))))
+#+END_SRC
+
+*** Quit
+
+Stops the ACP process and kills the ~*opencode*~ buffer:
+
+#+BEGIN_SRC emacs-lisp
+;;;###autoload
+(defun opencode-quit ()
+  "Kill the OpenCode buffer and process."
+  (interactive)
+  (opencode--stop-process)
+  (let ((buffer (get-buffer opencode-buffer-name)))
+    (when buffer
+      (kill-buffer buffer))))
+#+END_SRC
+
+*** Restart
+
+Stops and starts OpenCode again. Useful if the agent becomes
+unresponsive or you change the working directory:
+
+#+BEGIN_SRC emacs-lisp
+;;;###autoload
+(defun opencode-restart ()
+  "Restart the OpenCode ACP process."
+  (interactive)
+  (opencode--stop-process)
+  (opencode)
+  (message "OpenCode restarted."))
+#+END_SRC
+
+*** Set working directory
+
+Changes the ACP session's working directory and restarts. The ~"DDirectory: "~
+interactive code means ~D~ = read a directory path with completion:
+
+#+BEGIN_SRC emacs-lisp
+;;;###autoload
+(defun opencode-set-cwd (dir)
+  "Set the working directory for the current session and reconnect."
+  (interactive "DDirectory: ")
+  (setq opencode--cwd (expand-file-name dir))
+  (opencode-restart))
+#+END_SRC
+
+** 3.15 Auto-Start Hooks and Package Footer
+
+*** Auto-start placeholder
+
+A placeholder function for future auto-start functionality. Currently
+returns ~nil~ (no-op):
+
+#+BEGIN_SRC emacs-lisp
+(defun opencode--auto-start-p (filename)
+  "Maybe auto-start opencode for certain file types."
+  nil)
+#+END_SRC
+
+*** Provide the package
+
+~provide~ tells Emacs that this package has been loaded. This lets other
+code use ~(require 'opencode)~ to load it:
+
+#+BEGIN_SRC emacs-lisp
+(provide 'opencode)
+#+END_SRC
+
+*** File footer
+
+A trailing comment marks the end of the file (a convention in Emacs
+Lisp):
+
+#+BEGIN_SRC emacs-lisp
+;;; opencode.el ends here
+#+END_SRC
+
+* Part III: Quick Usage Guide
+
+** Installation
+
+1. Place ~opencode.el~ somewhere in your ~load-path~ (e.g., ~/.emacs.d/lisp/~).
+2. Add to your ~init.el~:
+
+#+BEGIN_SRC emacs-lisp :tangle no
+(require 'opencode)
+#+END_SRC
+
+Or, if you use a package manager like ~use-package~:
+
+#+BEGIN_SRC emacs-lisp :tangle no
+(use-package opencode
+  :load-path "path/to/opencode.el")
+#+END_SRC
+
+** Basic usage
+
+| Command / Key | What it does |
+|---------------|--------------|
+| ~M-x opencode~ | Open the ~*opencode*~ conversation buffer |
+| ~C-c C-c~ (in ~*opencode*~) | Type and send a prompt |
+| ~C-c C-r~ (in any buffer) | Select code, then ask about it |
+| ~C-c C-k~ | Cancel the current AI response |
+| ~C-c C-t~ | Toggle display of AI thinking |
+| ~C-c C-l~ | Clear the buffer |
+| ~C-c C-q~ | Quit (kill buffer and process) |
+
+** Workflow example
+
+1. Open a file with a function you want to refactor.
+2. Select the function body.
+3. Press ~C-c C-r~.
+4. Type ~"Refactor this to use error handling"~ and press ~RET~.
+5. Watch the AI think, then stream back the refactored code.
+6. If it is taking too long, press ~C-c C-k~ to cancel.
+7. Adjust your prompt and try again.
+
+** Configuration example
+
+#+BEGIN_SRC emacs-lisp :tangle no
+;; Custom executable path
+(setq opencode-executable "/usr/local/bin/opencode")
+
+;; Custom buffer name
+(setq opencode-buffer-name "*my-opencode*")
+
+;; Show AI thinking by default
+(setq opencode-show-thoughts t)
+#+END_SRC

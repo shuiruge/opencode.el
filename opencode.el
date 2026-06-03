@@ -10,8 +10,6 @@
 
 ;; This file is NOT part of GNU Emacs.
 
-;;; Commentary:
-
 ;; Provides Emacs integration with OpenCode (https://opencode.ai) using
 ;; the Agent Client Protocol (ACP).  No external dependencies beyond
 ;; built-in Emacs libraries.
@@ -28,9 +26,6 @@
 ;;; Code:
 
 (require 'json)
-
-
-;; ---- Customization ----
 
 (defgroup opencode nil
   "Integration with the OpenCode AI coding agent."
@@ -78,9 +73,6 @@ The thinking text is shown with `opencode-thought-face' (italic shadowed)."
   "Face for tool call status."
   :group 'opencode)
 
-
-;; ---- Internal State ----
-
 (defvar opencode--process nil
   "ACP subprocess object.")
 
@@ -121,17 +113,11 @@ The thinking text is shown with `opencode-thought-face' (italic shadowed)."
   "Type of the last content chunk (\\='thought or \\='message).")
 
 (defvar opencode--pending-queue nil
-  "Queue of prompts waiting for the session to become ready.")
+  "Queue of (prompt-text context-text context-filename) waiting for session.")
 
 (defvar opencode--status "disconnected"
   "Visible status string shown in the header line.
 One of: \"disconnected\", \"connecting\", \"ready\", \"processing\".")
-
-(defvar opencode--pending-queue nil
-  "Queue of (prompt-text context-text context-filename) waiting for session.")
-
-
-;; ---- JSON Helpers ----
 
 (defun opencode--json-encode (data)
   "Encode DATA to a JSON string with default settings."
@@ -149,9 +135,6 @@ One of: \"disconnected\", \"connecting\", \"ready\", \"processing\".")
 (defun opencode--json-get (key alist)
   "Get KEY (a symbol) from ALIST."
   (cdr (assq key alist)))
-
-
-;; ---- Process Management ----
 
 (defun opencode--process-send (string)
   "Send STRING followed by newline to the ACP subprocess."
@@ -244,9 +227,6 @@ One of: \"disconnected\", \"connecting\", \"ready\", \"processing\".")
         opencode--shutting-down nil)
   (opencode--update-header))
 
-
-;; ---- JSON-RPC Layer ----
-
 (defun opencode--send-request (method params &optional callback)
   "Send a JSON-RPC request.  If CALLBACK is given, call it with (RESULT ERROR) upon response."
   (setq opencode--rpc-id (1+ opencode--rpc-id))
@@ -288,17 +268,14 @@ One of: \"disconnected\", \"connecting\", \"ready\", \"processing\".")
          (result (opencode--json-get 'result msg))
          (error-obj (opencode--json-get 'error msg)))
     (cond
-     ;; Request response (has id, could also have method)
      ((and id (not method))
       (let ((pair (assq id opencode--rpc-callbacks)))
         (when pair
           (setq opencode--rpc-callbacks (delq pair opencode--rpc-callbacks))
           (funcall (cdr pair) result (and error-obj
                                           (opencode--json-get 'message error-obj))))))
-     ;; Notification (has method, no id)
      ((and method (not id))
       (opencode--handle-notification method (opencode--json-get 'params msg)))
-     ;; Error or unknown
      (error-obj
       (message "OpenCode RPC error: %s" (opencode--json-get 'message error-obj))))))
 
@@ -309,9 +286,6 @@ One of: \"disconnected\", \"connecting\", \"ready\", \"processing\".")
      (opencode--handle-update params))
     (_
      (message "OpenCode: unhandled notification: %s" method))))
-
-
-;; ---- ACP Session Management ----
 
 (defun opencode--acp-initialize ()
   "Initialize the ACP connection."
@@ -359,16 +333,12 @@ One of: \"disconnected\", \"connecting\", \"ready\", \"processing\".")
   (opencode--buffer-insert
    (format ";; Session: %s\n" opencode--session-id))
   (opencode--buffer-insert ";; Ready.\n")
-  ;; Flush queued prompts
   (when opencode--pending-queue
     (opencode--buffer-insert ";; Processing queued prompts...\n")
     (let ((queue (nreverse opencode--pending-queue)))
       (setq opencode--pending-queue nil)
       (dolist (args queue)
         (apply #'opencode--send-prompt-internal args)))))
-
-
-;; ---- Prompt Handling ----
 
 (defun opencode--do-send-prompt (prompt-text &optional context-text context-filename)
   "Send PROMPT-TEXT to the current ACP session.
@@ -443,9 +413,6 @@ Optional CONTEXT-TEXT and CONTEXT-FILENAME provide file context."
      `((sessionId . ,opencode--session-id)))
     (message "Cancelling...")))
 
-
-;; ---- Update Handling ----
-
 (defun opencode--handle-update (params)
   "Handle a session/update notification."
   (let* ((update (opencode--json-get 'update params))
@@ -461,9 +428,9 @@ Optional CONTEXT-TEXT and CONTEXT-FILENAME provide file context."
       ("tool_call_update"
        (opencode--handle-tool-call-update update))
       ("user_message_chunk"
-       nil)  ;; ignore during replay
+       nil)
       (_
-       nil))))  ;; ignore others (plan, available_commands_update, etc.)
+       nil))))
 
 (defun opencode--handle-content-chunk (update face)
   "Append a content chunk from UPDATE to the buffer using FACE."
@@ -474,7 +441,6 @@ Optional CONTEXT-TEXT and CONTEXT-FILENAME provide file context."
       (with-current-buffer (get-buffer-create opencode-buffer-name)
         (let ((inhibit-read-only t))
           (goto-char (point-max))
-          ;; Insert separator when switching from thought to message
           (when (and (eq face 'opencode-agent-face)
                      (eq opencode--last-chunk-type 'thought))
             (insert "\n"))
@@ -528,9 +494,6 @@ Optional CONTEXT-TEXT and CONTEXT-FILENAME provide file context."
 
 (define-obsolete-function-alias 'opencode--handle-tool-status
   'opencode--handle-tool-call-update "0.1")
-
-
-;; ---- Buffer Display ----
 
 (defun opencode--insert-header (label face)
   "Insert a message header with LABEL using FACE."
@@ -591,9 +554,6 @@ Optional CONTEXT-TEXT and CONTEXT-FILENAME provide file context."
     (opencode--start-process)
     (opencode--acp-initialize)))
 
-
-;; ---- Major Mode ----
-
 (defvar-keymap opencode-mode-map
   :doc "Keymap for opencode-mode."
   "C-c C-c" #'opencode-send-prompt
@@ -646,9 +606,6 @@ Commands:
   "Show help for opencode-mode."
   (interactive)
   (describe-function 'opencode-mode))
-
-
-;; ---- Interactive Commands ----
 
 ;;;###autoload
 (defun opencode ()
@@ -733,9 +690,6 @@ With no active region, falls back to `opencode-send-prompt'."
   (interactive "DDirectory: ")
   (setq opencode--cwd (expand-file-name dir))
   (opencode-restart))
-
-
-;; ---- Hints ----
 
 (defun opencode--auto-start-p (filename)
   "Maybe auto-start opencode for certain file types."

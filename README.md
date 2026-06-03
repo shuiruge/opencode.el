@@ -1,8 +1,8 @@
 # opencode.el — Emacs Integration for OpenCode
 
-🀄[中文版](README-zh.md)
-
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+
+🀄[中文版](README-zh.md)
 
 opencode.el is an Emacs package that interacts with the [OpenCode](https://opencode.ai) AI coding agent via the **ACP (Agent Client Protocol)**. Zero external dependencies — built entirely with Emacs built-in libraries.
 
@@ -20,6 +20,18 @@ Or with `use-package`:
 (use-package opencode
   :load-path "/path/to/opencode.el"
   :bind (("C-c o" . opencode)))
+```
+
+## Project Structure
+
+```
+opencode.el/
+├── opencode.el        # Emacs Lisp client implementation (ACP protocol)
+├── opencode.el.org    # Literate programming document (Org Mode, tangle-able)
+├── ACP.md             # ACP protocol explanation (Chinese)
+├── PRD.md             # Product requirements document (Chinese)
+├── README.md          # This file
+└── README-zh.md       # Chinese README
 ```
 
 ## Usage

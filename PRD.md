@@ -173,6 +173,53 @@ opencode-show-thoughts  ;; t，显示 thinking 内容
 | 进程退出 | sentinel 清理状态，设 `opencode--ready = nil` |
 | 重复 `initialize` | `opencode--ensure-connected` 仅在进程未运行时调用 |
 
+## 文档：Literate Programming（文字编程）
+
+### 目标
+
+创建 `opencode.el.org`，一份 Org Mode 格式的**文字编程**文档，同时满足两个目的：
+
+1. **教学**：讲解 ACP 协议原理（整合 `ACP.md` 内容），从零开始解释编辑器与 AI 代理如何通信。
+2. **代码文档**：逐模块讲解 `opencode.el` 的设计与实现，让缺乏经验的开发者也能理解。
+
+### 规格
+
+| 要求 | 说明 |
+|------|------|
+| **格式** | Org Mode（`.org`），兼容 `org-babel-tangle` |
+| **提取** | `emacs -Q --batch --load org --eval "(org-babel-tangle-file \"opencode.el.org\")"` 可提取出可运行的 `opencode.el` |
+| **一致性** | 提取出的代码与 `opencode.el` 的代码部分保持一致；注释可依据 `.org` 中的讲解适度调整 |
+| **语言** | 英文书写 |
+| **读者** | 具备基本编程能力但缺乏经验的开发者，讲解需详细 |
+
+### 文档结构
+
+```
+* Part I: Understanding ACP
+  - 问题背景、协议概念、三次握手、流式更新、全流程可视化
+* Part II: Code Walkthrough
+  - 14 个模块逐一讲解（文件头、依赖、配置项、内部状态、JSON 工具、
+    进程管理、JSON-RPC 层、ACP 会话管理、Prompt 处理、流式更新、
+    Buffer 显示、Major Mode、交互命令、包尾）
+* Part III: Quick Usage Guide
+  - 安装、快捷键、配置示例
+```
+
+### 代码块管理
+
+| 类型 | Tangle 标记 | 用途 |
+|------|------------|------|
+| 实际代码块 | `:tangle "opencode.el"` | 构成最终 `opencode.el` 的代码 |
+| 教学示例 | `:tangle no` | 文章中用于演示的片段，不参与提取 |
+
+每个代码模块在文档中先讲解原理，再展示对应代码块。讲解部分使用表格、流程图（ASCII art）、分点说明等方式降低理解门槛。
+
+### 验证
+
+运行 tangle 后：
+- 生成的 `opencode.el` 需能通过 Emacs 的 `load-file` 加载无报错
+- 所有 `defun`/`defvar`/`defcustom`/`defface` 结构应与原始 `opencode.el` 一致（仅允许移除重复变量声明等显式 bugfix）
+
 ## 非目标
 
 - 不实现完整的 ACP 客户端（只实现最小必要子集）
