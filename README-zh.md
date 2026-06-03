@@ -64,7 +64,7 @@ M-x opencode
 
 ## 作者
 
-OpenCode
+OpenCode + shuiruge@hotmail.com
 
 ## 协议
 

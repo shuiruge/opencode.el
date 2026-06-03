@@ -64,7 +64,7 @@ Opens the `*opencode*` buffer. Type a prompt and press `C-c C-c` to send, or sel
 
 ## Author
 
-OpenCode
+OpenCode + shuiruge@hotmail.com
 
 ## License
 
