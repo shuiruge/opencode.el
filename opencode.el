@@ -499,7 +499,7 @@ Optional CONTEXT-TEXT and CONTEXT-FILENAME provide file context."
   "Insert a message header with LABEL using FACE."
   (let ((inhibit-read-only t)
         (time (format-time-string "%H:%M:%S")))
-    (insert "\n" (propertize (format "<<< %s [%s] >>>\n" label time)
+    (insert "\n\n" (propertize (format "<<< %s [%s] >>>\n" label time)
                              'face face))
     (insert "\n")))
 
